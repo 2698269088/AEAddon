@@ -1,0 +1,21 @@
+name: AEAddon
+version: '1.0'
+main: top.mcocet.aEAddon.AEAddon
+api-version: '1.21'
+folia-supported: true
+authors: [ MCOCET ]
+description: AdvancedEnchantments的扩展插件，修复AE无法运行在Folia的问题
+website: https://home.mcocet.top/
+loadbefore: [ AdvancedEnchantments ]
+
+commands:
+  aeaddon:
+    description: "AEAddon主命令 - 打开附魔书管理面板"
+    usage: "/aeaddon"
+    aliases: [ aea ]
+    permission: aeaddon.admin
+
+permissions:
+  aeaddon.admin:
+    default: op
+    description: "允许使用AEAddon的管理员命令和GUI"
