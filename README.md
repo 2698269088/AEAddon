@@ -1,0 +1,2 @@
+# AEAddon
+AdvancedEnchantments的扩展插件，修复AE无法运行在Folia的问题
