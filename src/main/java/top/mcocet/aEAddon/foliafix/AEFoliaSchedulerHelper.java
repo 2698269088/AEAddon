@@ -323,7 +323,9 @@ public class AEFoliaSchedulerHelper {
 
     /**
      * Wraps a Runnable with exception handling.
-     * If taskHolder is provided and the task throws, the holder's task will be cancelled.
+     * Matches Bukkit semantics: an exception thrown by a repeating task is logged
+     * but does NOT cancel the task, so a transient failure (e.g. a rare race in AE)
+     * won't silently kill AE's repeating triggers until restart.
      */
     private static Runnable wrap(Plugin plugin, Runnable task, BukkitTask[] taskHolder) {
         return () -> {
@@ -331,17 +333,6 @@ public class AEFoliaSchedulerHelper {
                 task.run();
             } catch (Exception e) {
                 plugin.getLogger().log(Level.WARNING, "Task exception in AE Folia wrapper", e);
-                if (taskHolder != null && taskHolder[0] != null) {
-                    try {
-                        taskHolder[0].cancel();
-                    } catch (UnsupportedOperationException ex) {
-                        // Folia doesn't support CraftScheduler.cancelTask
-                        // Cancel the underlying Folia task directly
-                        if (taskHolder[0] instanceof FoliaBukkitTask) {
-                            ((FoliaBukkitTask) taskHolder[0]).cancelDirect();
-                        }
-                    }
-                }
             }
         };
     }

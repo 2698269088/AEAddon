@@ -16,6 +16,10 @@ import java.util.logging.Level;
  * 2. Bukkit.getScheduler() calls are redirected through AEFoliaSchedulerHelper so AE
  *    can use Folia's GlobalRegionScheduler / AsyncScheduler without touching the
  *    server's global BukkitScheduler (which would affect other plugins).
+ * 3. ActionExecution.addDisabledAbility / getDisabledAbilities are rewritten to delegate
+ *    to ActionExecutionConcurrencyHelper, which serializes access to AE's plain static
+ *    HashMap. On Folia the REPEATING trigger (global tick thread) iterates that map while
+ *    region threads mutate it, causing ConcurrentModificationException.
  *
  * Only classes inside the AE jar are transformed.
  */
@@ -28,11 +32,14 @@ public class ApplyPotionEffectTransformer implements ClassFileTransformer {
     private static int schedulerPatchCount = 0;
     private static int bukkitRunnablePatchCount = 0;
     private static int foliaSchedulerAsyncRewriteCount = 0;
+    private static int concurrencyPatchCount = 0;
 
     private static final String HELPER_CLASS = "top/mcocet/aEAddon/foliafix/FoliaPotionHelper";
     private static final String SCHEDULER_HELPER_CLASS = "top/mcocet/aEAddon/foliafix/AEFoliaSchedulerHelper";
+    private static final String CONCURRENCY_HELPER_CLASS = "top/mcocet/aEAddon/foliafix/ActionExecutionConcurrencyHelper";
     private static final String BUKKIT_CLASS = "org/bukkit/Bukkit";
     private static final String BUKKIT_SCHEDULER_CLASS = "org/bukkit/scheduler/BukkitScheduler";
+    private static final String ACTION_EXECUTION_CLASS = "net/advancedplugins/ae/impl/effects/effects/actions/ActionExecution";
 
     public static void setPluginLogger(java.util.logging.Logger logger) {
         pluginLogger = logger;
@@ -42,7 +49,8 @@ public class ApplyPotionEffectTransformer implements ClassFileTransformer {
         return "transformCalls=" + transformCallCount
                 + ", schedulerPatches=" + schedulerPatchCount
                 + ", bukkitRunnablePatches=" + bukkitRunnablePatchCount
-                + ", foliaSchedulerAsyncRewrites=" + foliaSchedulerAsyncRewriteCount;
+                + ", foliaSchedulerAsyncRewrites=" + foliaSchedulerAsyncRewriteCount
+                + ", concurrencyPatches=" + concurrencyPatchCount;
     }
 
     private static void logInfo(String message) {
@@ -232,9 +240,10 @@ public class ApplyPotionEffectTransformer implements ClassFileTransformer {
         boolean patchEntity = ENTITY_TARGET_CLASSES.contains(className);
         boolean patchScheduler = isAeClass;
         boolean patchFoliaSchedulerAsync = "net/advancedplugins/ae/impl/utils/FoliaScheduler".equals(className);
+        boolean patchConcurrency = ACTION_EXECUTION_CLASS.equals(className);
 
         // OPTIMIZATION: If nothing to patch, skip quickly
-        if (!patchEntity && !patchScheduler && !patchFoliaSchedulerAsync) {
+        if (!patchEntity && !patchScheduler && !patchFoliaSchedulerAsync && !patchConcurrency) {
             return null;
         }
 
@@ -246,7 +255,7 @@ public class ApplyPotionEffectTransformer implements ClassFileTransformer {
             ClassReader reader = new ClassReader(classfileBuffer);
             ClassWriter writer = new SafeClassWriter(reader, loader,
                     ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
-            ClassVisitor visitor = new EffectClassVisitor(writer, className, patchEntity, patchScheduler, patchFoliaSchedulerAsync);
+            ClassVisitor visitor = new EffectClassVisitor(writer, className, patchEntity, patchScheduler, patchFoliaSchedulerAsync, patchConcurrency);
             reader.accept(visitor, ClassReader.EXPAND_FRAMES);
 
             logInfo("[AEAddon-FoliaFix] Transformed class: " + className);
@@ -280,14 +289,17 @@ public class ApplyPotionEffectTransformer implements ClassFileTransformer {
         private final boolean patchEntity;
         private final boolean patchScheduler;
         private final boolean patchFoliaSchedulerAsync;
+        private final boolean patchConcurrency;
 
         public EffectClassVisitor(ClassVisitor cv, String className, boolean patchEntity,
-                                  boolean patchScheduler, boolean patchFoliaSchedulerAsync) {
+                                  boolean patchScheduler, boolean patchFoliaSchedulerAsync,
+                                  boolean patchConcurrency) {
             super(Opcodes.ASM9, cv);
             this.className = className;
             this.patchEntity = patchEntity;
             this.patchScheduler = patchScheduler;
             this.patchFoliaSchedulerAsync = patchFoliaSchedulerAsync;
+            this.patchConcurrency = patchConcurrency;
         }
 
         @Override
@@ -299,7 +311,22 @@ public class ApplyPotionEffectTransformer implements ClassFileTransformer {
                 return new FoliaSchedulerAsyncMethodRewriter(mv, name, descriptor);
             }
 
+            if (patchConcurrency && isDisabledAbilitiesAccessor(name, descriptor)) {
+                concurrencyPatchCount++;
+                return new DelegateToHelperMethodRewriter(mv, CONCURRENCY_HELPER_CLASS, name, descriptor);
+            }
+
             return new EffectMethodVisitor(mv, patchEntity, patchScheduler, className.startsWith("net/advancedplugins/ae/"));
+        }
+
+        private boolean isDisabledAbilitiesAccessor(String name, String descriptor) {
+            if ("addDisabledAbility".equals(name)) {
+                return "(Ljava/util/UUID;Ljava/lang/String;I)V".equals(descriptor);
+            }
+            if ("getDisabledAbilities".equals(name)) {
+                return "(Ljava/util/UUID;)Ljava/util/List;".equals(descriptor);
+            }
+            return false;
         }
 
         private boolean isFoliaSchedulerAsyncMethod(String name, String descriptor) {
@@ -708,6 +735,189 @@ public class ApplyPotionEffectTransformer implements ClassFileTransformer {
             }
 
             return false;
+        }
+    }
+
+    /**
+     * Replaces the entire body of a static method with a delegation to a helper
+     * method with the same name and descriptor. Used to reroute ActionExecution's
+     * disabledAbilities accessors to ActionExecutionConcurrencyHelper.
+     */
+    private static class DelegateToHelperMethodRewriter extends MethodVisitor {
+
+        private final String helperOwner;
+        private final String methodName;
+        private final String methodDescriptor;
+        private boolean codeStarted = false;
+
+        public DelegateToHelperMethodRewriter(MethodVisitor mv, String helperOwner, String methodName, String methodDescriptor) {
+            super(Opcodes.ASM9, mv);
+            this.helperOwner = helperOwner;
+            this.methodName = methodName;
+            this.methodDescriptor = methodDescriptor;
+        }
+
+        @Override
+        public void visitCode() {
+            codeStarted = true;
+            mv.visitCode();
+            logInfo("[AEAddon-FoliaFix] Rewriting method body to delegate to helper: " + methodName);
+            emitNewBody();
+        }
+
+        @Override
+        public void visitInsn(int opcode) {
+            // Ignore original instructions.
+        }
+
+        @Override
+        public void visitIntInsn(int opcode, int operand) {
+            // Ignore original instructions.
+        }
+
+        @Override
+        public void visitVarInsn(int opcode, int varIndex) {
+            // Ignore original instructions.
+        }
+
+        @Override
+        public void visitTypeInsn(int opcode, String type) {
+            // Ignore original instructions.
+        }
+
+        @Override
+        public void visitFieldInsn(int opcode, String owner, String name, String descriptor) {
+            // Ignore original instructions.
+        }
+
+        @Override
+        public void visitMethodInsn(int opcode, String owner, String name, String descriptor, boolean isInterface) {
+            // Ignore original instructions.
+        }
+
+        @Override
+        public void visitJumpInsn(int opcode, Label label) {
+            // Ignore original instructions.
+        }
+
+        @Override
+        public void visitLabel(Label label) {
+            // Ignore original instructions.
+        }
+
+        @Override
+        public void visitLdcInsn(Object value) {
+            // Ignore original instructions.
+        }
+
+        @Override
+        public void visitIincInsn(int varIndex, int increment) {
+            // Ignore original instructions.
+        }
+
+        @Override
+        public void visitTableSwitchInsn(int min, int max, Label dflt, Label... labels) {
+            // Ignore original instructions.
+        }
+
+        @Override
+        public void visitLookupSwitchInsn(Label dflt, int[] keys, Label[] labels) {
+            // Ignore original instructions.
+        }
+
+        @Override
+        public void visitMultiANewArrayInsn(String descriptor, int numDimensions) {
+            // Ignore original instructions.
+        }
+
+        @Override
+        public void visitFrame(int type, int numLocal, Object[] local, int numStack, Object[] stack) {
+            // Ignore original frames; COMPUTE_FRAMES will recalculate.
+        }
+
+        @Override
+        public void visitTryCatchBlock(Label start, Label end, Label handler, String type) {
+            // Ignore original try/catch blocks.
+        }
+
+        @Override
+        public void visitLineNumber(int line, Label start) {
+            // Ignore original line numbers.
+        }
+
+        @Override
+        public void visitLocalVariable(String name, String descriptor, String signature, Label start, Label end, int index) {
+            // Ignore original local variable table.
+        }
+
+        @Override
+        public void visitMaxs(int maxStack, int maxLocals) {
+            if (!codeStarted) {
+                // visitCode was never called; emit a minimal body to keep the class valid.
+                mv.visitCode();
+                emitNewBody();
+            }
+            mv.visitMaxs(-1, -1);
+        }
+
+        @Override
+        public void visitEnd() {
+            mv.visitEnd();
+        }
+
+        private void emitNewBody() {
+            // Load all parameters (target methods are static, so slots start at 0).
+            int slot = 0;
+            for (Type argType : Type.getArgumentTypes(methodDescriptor)) {
+                int loadOpcode;
+                switch (argType.getSort()) {
+                    case Type.LONG:
+                        loadOpcode = Opcodes.LLOAD;
+                        break;
+                    case Type.FLOAT:
+                        loadOpcode = Opcodes.FLOAD;
+                        break;
+                    case Type.DOUBLE:
+                        loadOpcode = Opcodes.DLOAD;
+                        break;
+                    case Type.INT:
+                    case Type.SHORT:
+                    case Type.BYTE:
+                    case Type.CHAR:
+                    case Type.BOOLEAN:
+                        loadOpcode = Opcodes.ILOAD;
+                        break;
+                    default:
+                        loadOpcode = Opcodes.ALOAD;
+                        break;
+                }
+                mv.visitVarInsn(loadOpcode, slot);
+                slot += argType.getSize();
+            }
+
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, helperOwner, methodName, methodDescriptor, false);
+
+            switch (Type.getReturnType(methodDescriptor).getSort()) {
+                case Type.VOID:
+                    mv.visitInsn(Opcodes.RETURN);
+                    break;
+                case Type.LONG:
+                    mv.visitInsn(Opcodes.LRETURN);
+                    break;
+                case Type.FLOAT:
+                    mv.visitInsn(Opcodes.FRETURN);
+                    break;
+                case Type.DOUBLE:
+                    mv.visitInsn(Opcodes.DRETURN);
+                    break;
+                case Type.ARRAY:
+                case Type.OBJECT:
+                    mv.visitInsn(Opcodes.ARETURN);
+                    break;
+                default:
+                    mv.visitInsn(Opcodes.IRETURN);
+                    break;
+            }
         }
     }
 
