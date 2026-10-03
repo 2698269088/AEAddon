@@ -20,7 +20,7 @@ Thread failed main thread check: Cannot add effects to entities asynchronously
 **原因：** AE 在 `GlobalRegionScheduler` 上执行药水效果，但 `addPotionEffect` 必须在实体区域线程上执行。
 **修复：** 通过 ASM 转换器将 `addPotionEffect` / `removePotionEffect` 调用替换为 `FoliaPotionHelper` 的线程安全版本。
 
-### 2. 僵尸/生物假死（核心修复）
+### 2. 僵尸/生物假死
 **现象：**
 - 玩家使用某些附魔击杀僵尸或其他生物后，生物进入"假死"状态
 - 客户端不断闪烁死亡动画，但玩家无法攻击到该生物
