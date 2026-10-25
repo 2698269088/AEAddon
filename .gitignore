@@ -1,0 +1,17 @@
+# Maven build output
+target/
+
+# Local build dependency: AdvancedEnchantments is a paid plugin, do not redistribute its jar
+lib/
+
+# IDE
+.idea/
+*.iws
+*.ipr
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log

@@ -97,22 +97,6 @@ Thread failed main thread check: Accessing entity state off owning region's thre
 
 ---
 
-## 技术实现
-
-### 架构
-
-```
-AEAddon
-├── AEAddon.java                  # 插件主类，初始化所有组件
-├── foliafix/
-│   ├── AEFoliaByteBuddyPatcher   # ByteBuddy 动态 Agent 入口
-│   ├── ApplyPotionEffectTransformer  # ASM ClassFileTransformer
-│   ├── FoliaPotionHelper         # 线程安全实体操作帮助类
-│   ├── AEFoliaSchedulerHelper    # Folia 调度器代理
-│   └── AEFoliaFixListener        # 事件监听器（备用修复层）
-└── ...
-```
-
 ### 工作流程
 
 1. **插件启动**：`AEAddon.onEnable()` 检测是否运行在 Folia 上
@@ -225,22 +209,6 @@ ASM 转换器会拦截以下 AE 类：
 
 ---
 
-## 构建
-
-### 环境准备
-- JDK 17+
-- Maven 3.8+
-
-### 构建命令
-
-```bash
-mvn clean package -DskipTests
-```
-
-生成的 jar 文件位于 `target/AEAddon-1.0.jar`
-
----
-
 ## 注意事项
 
 2. 更新 AE 插件版本后可能需要更新 AEAddon 的 ASM 转换目标类列表
@@ -254,24 +222,3 @@ mvn clean package -DskipTests
 - 假死修复仅对通过 ASM 转换拦截到的 `setHealth()` 调用生效
 
 ---
-
-## 故障排查
-
-### 假死问题仍然存在
-1. 确认控制台有 `[AEAddon-FoliaFix] Retransform complete` 输出
-2. 检查 `Transformer stats` 中 `transformCalls` 是否大于 0
-3. 确认 AE 版本与转换目标类匹配（查看 `ApplyPotionEffectTransformer.ENTITY_TARGET_CLASSES`）
-
-### 转换失败
-1. 检查 Java 版本是否为 17+
-2. 确认 ByteBuddy Agent 有权限附加到 JVM
-3. 查看控制台详细错误日志
-
----
-
-## 技术栈
-
-- **ByteBuddy**：运行时字节码修改
-- **ASM 9**：底层字节码操作
-- **Folia API**：区域化线程调度
-- **Bukkit API**：Minecraft 插件接口

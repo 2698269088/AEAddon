@@ -260,60 +260,21 @@ public class AEFoliaByteBuddyPatcher {
     /**
      * This method is called by the transformed ApplyPotionEffect class.
      * It executes addPotionEffect on the correct Folia scheduler thread.
+     * Delegates to FoliaPotionHelper, which uses EntityScheduler so the task always
+     * runs on the entity's current owning region (never on a stale location).
      */
     public static boolean addPotionEffect(LivingEntity entity, PotionEffect effect) {
-        if (!isFolia || regionScheduler == null || regionExecuteMethod == null) {
-            return entity.addPotionEffect(effect);
-        }
-        
-        // Check if already on correct thread
-        if (isOnEntityThread(entity)) {
-            return entity.addPotionEffect(effect);
-        }
-        
-        // Schedule on correct thread
-        try {
-            regionExecuteMethod.invoke(regionScheduler, plugin, entity.getLocation(), (Runnable) () -> {
-                try {
-                    entity.addPotionEffect(effect);
-                } catch (Exception e) {
-                    plugin.getLogger().warning("[AEFoliaFix] Failed to add potion effect: " + e.getMessage());
-                }
-            });
-            return true;
-        } catch (Exception e) {
-            plugin.getLogger().warning("[AEFoliaFix] Failed to schedule potion effect: " + e.getMessage());
-            return entity.addPotionEffect(effect);
-        }
+        return FoliaPotionHelper.addPotionEffect(entity, effect);
     }
     
     /**
      * This method is called by the transformed ApplyPotionEffect class.
      * It executes removePotionEffect on the correct Folia scheduler thread.
+     * Delegates to FoliaPotionHelper, which uses EntityScheduler so the task always
+     * runs on the entity's current owning region (never on a stale location).
      */
     public static void removePotionEffect(LivingEntity entity, PotionEffectType type) {
-        if (!isFolia || regionScheduler == null || regionExecuteMethod == null) {
-            entity.removePotionEffect(type);
-            return;
-        }
-        
-        if (isOnEntityThread(entity)) {
-            entity.removePotionEffect(type);
-            return;
-        }
-        
-        try {
-            regionExecuteMethod.invoke(regionScheduler, plugin, entity.getLocation(), (Runnable) () -> {
-                try {
-                    entity.removePotionEffect(type);
-                } catch (Exception e) {
-                    plugin.getLogger().warning("[AEFoliaFix] Failed to remove potion effect: " + e.getMessage());
-                }
-            });
-        } catch (Exception e) {
-            plugin.getLogger().warning("[AEFoliaFix] Failed to schedule potion removal: " + e.getMessage());
-            entity.removePotionEffect(type);
-        }
+        FoliaPotionHelper.removePotionEffect(entity, type);
     }
     
     private static boolean isOnEntityThread(Entity entity) {

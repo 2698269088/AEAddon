@@ -39,6 +39,12 @@ public class FoliaPotionHelper {
     private static MethodHandle isOwnedMethodHandle = null;
     private static boolean isOwnedMethodChecked = false;
 
+    // EntityScheduler (reflection, so this class still loads on non-Folia servers)
+    private static Method entityGetSchedulerMethod = null;
+    private static Method entitySchedulerRunMethod = null;
+    private static boolean entitySchedulerChecked = false;
+    private static volatile boolean droppedTaskWarned = false;
+
     // Simple caches for non-blocking reads with cleanup support
     private static final Map<UUID, Double> healthCache = new ConcurrentHashMap<>();
     private static final Map<UUID, Double> maxHealthCache = new ConcurrentHashMap<>();
@@ -62,6 +68,7 @@ public class FoliaPotionHelper {
 
             // Pre-initialize MethodHandle for faster thread checks
             initIsOwnedMethodHandle();
+            initEntitySchedulerMethods();
 
             // Start cache cleanup task
             startCacheCleanupTask();
@@ -95,6 +102,53 @@ public class FoliaPotionHelper {
             isOwnedMethodHandle = null;
         }
         isOwnedMethodChecked = true;
+    }
+
+    /**
+     * Resolve EntityScheduler#run reflectively so this class still loads on non-Folia servers.
+     */
+    private static void initEntitySchedulerMethods() {
+        entitySchedulerChecked = true;
+        try {
+            entityGetSchedulerMethod = Class.forName("org.bukkit.entity.Entity").getMethod("getScheduler");
+            // Derive the scheduler type from the API instead of hard-coding the Folia class name.
+            entitySchedulerRunMethod = entityGetSchedulerMethod.getReturnType().getMethod("run",
+                    org.bukkit.plugin.Plugin.class, java.util.function.Consumer.class, Runnable.class);
+        } catch (Throwable e) {
+            entityGetSchedulerMethod = null;
+            entitySchedulerRunMethod = null;
+        }
+    }
+
+    /**
+     * Queue a task on the entity's owning region via EntityScheduler.
+     *
+     * RegionScheduler is not safe for entity work on Folia: it needs a Location and
+     * Entity#getLocation() may still report the position from before the entity moved to
+     * another region, which queues the task on the wrong region thread ("Accessing entity
+     * state off owning region's thread"). EntityScheduler follows the entity instead and
+     * invokes the retired callback once the entity is gone, so a cached/stale entity
+     * reference can never run entity work on the wrong thread.
+     */
+    private static boolean scheduleOnEntityScheduler(Entity entity, Runnable task) {
+        if (!entitySchedulerChecked) {
+            initEntitySchedulerMethods();
+        }
+        if (entityGetSchedulerMethod == null || entitySchedulerRunMethod == null) {
+            return false;
+        }
+        try {
+            Object scheduler = entityGetSchedulerMethod.invoke(entity);
+            if (scheduler == null) {
+                return false;
+            }
+            entitySchedulerRunMethod.invoke(scheduler, plugin,
+                    (java.util.function.Consumer<Object>) scheduledTask -> task.run(),
+                    (Runnable) () -> LOGGER.fine("[AEAddon-FoliaFix] Entity retired before entity task ran, task dropped"));
+            return true;
+        } catch (Throwable e) {
+            return false;
+        }
     }
 
     /**
@@ -143,7 +197,7 @@ public class FoliaPotionHelper {
      * Execute a task on the entity's region thread.
      */
     public static void executeOnEntityThread(Entity entity, Runnable task) {
-        if (!isFolia || regionScheduler == null || executeMethod == null) {
+        if (!isFolia) {
             task.run();
             return;
         }
@@ -153,11 +207,28 @@ public class FoliaPotionHelper {
             return;
         }
 
-        try {
-            executeMethod.invoke(regionScheduler, plugin, entity.getLocation(), task);
-        } catch (Exception e) {
-            LOGGER.log(Level.WARNING, "[AEAddon-FoliaFix] Failed to schedule entity task: " + e.getMessage(), e);
-            task.run();
+        // Preferred path: EntityScheduler keeps following the entity across region moves.
+        if (scheduleOnEntityScheduler(entity, task)) {
+            return;
+        }
+
+        // Fallback for servers without EntityScheduler support.
+        if (regionScheduler != null && executeMethod != null) {
+            try {
+                executeMethod.invoke(regionScheduler, plugin, entity.getLocation(), task);
+                return;
+            } catch (Exception e) {
+                LOGGER.log(Level.WARNING, "[AEAddon-FoliaFix] Failed to schedule entity task: " + e.getMessage(), e);
+            }
+        }
+
+        // Running the task here would touch the entity off its owning region thread and
+        // fail the Folia thread check, so drop it instead of spamming the console.
+        if (!droppedTaskWarned) {
+            droppedTaskWarned = true;
+            LOGGER.warning("[AEAddon-FoliaFix] No usable entity scheduler, dropping entity tasks to avoid Folia thread-check errors");
+        } else {
+            LOGGER.fine("[AEAddon-FoliaFix] Entity task dropped (no usable scheduler)");
         }
     }
 

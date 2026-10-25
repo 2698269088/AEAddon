@@ -4,7 +4,7 @@
   <groupId>top.mcocet</groupId>
   <artifactId>AEAddon</artifactId>
   <name>AEAddon</name>
-  <version>1.0</version>
+  <version>1.1</version>
   <build>
     <defaultGoal>clean package</defaultGoal>
     <resources>
@@ -71,11 +71,11 @@
       <artifactId>AdvancedEnchantments</artifactId>
       <version>9.24.10</version>
       <scope>system</scope>
-      <systemPath>${project.basedir}/lib/AdvancedEnchantments-9.24.10-bm.jar</systemPath>
+      <systemPath>${project.basedir}/lib/AdvancedEnchantments-9.24.10.jar</systemPath>
     </dependency>
   </dependencies>
   <properties>
-    <java.version>21</java.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <java.version>21</java.version>
   </properties>
 </project>
